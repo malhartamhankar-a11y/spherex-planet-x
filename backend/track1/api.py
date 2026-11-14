@@ -89,6 +89,27 @@ async def get_cutouts(ra: float | None = None, dec: float | None = None, name: s
             "frames": frames}
 
 
+PRECACHE_DIR = cutouts.CUTOUT_DIR.parent / "targets"
+
+
+@app.get("/api/precached")
+def precached(slug: str | None = None):
+    """Demo targets prepared by scripts/precache.py (instant, works offline)."""
+    import json
+    if slug:
+        f = PRECACHE_DIR / f"{slug}.json"
+        if not f.exists():
+            raise HTTPException(404, f"No pre-cached target '{slug}'")
+        return json.loads(f.read_text())
+    out = []
+    for f in sorted(PRECACHE_DIR.glob("*.json")):
+        m = json.loads(f.read_text())
+        out.append({"slug": f.stem, "name": m["target"]["name"], "ra": m["ra"], "dec": m["dec"],
+                    "n_exposures": m["n_exposures"], "n_visits": len(m["visits"]),
+                    "detectors": list(m["frames_by_detector"]), "created_utc": m["created_utc"]})
+    return {"targets": out}
+
+
 @app.get("/api/collections")
 def collections():
     try:

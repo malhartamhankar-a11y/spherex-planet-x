@@ -84,3 +84,32 @@ def test_small_visit_gives_its_leftover_to_others():
 
 def test_no_options_returns_everything():
     assert len(visits.select_frames(_fake_visits([3, 4]))) == 7
+
+
+def test_detector_filter_reuses_one_cached_query(tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "CACHE_DIR", tmp_path)
+    calls = []
+    def counting_tap(q):
+        calls.append(q)
+        return FAKE
+    d5 = archive.search(10, 20, detector="D5", tap=counting_tap)
+    d2 = archive.search(10, 20, detector="D2", tap=counting_tap)
+    allx = archive.search(10, 20, tap=counting_tap)
+    assert len(calls) == 1
+    assert [e.detector for e in d5] == ["SPHEREx-D5"]
+    assert {e.detector for e in d2} == {"SPHEREx-D2"} and len(allx) == 3
+
+
+def test_targets_load_and_propagate():
+    from track1.targets import load_targets
+    ts = {t.slug: t for t in load_targets()}
+    assert len(ts) == 5
+    b = ts["barnard-s-star"]
+    assert b.detectors == ["D1", "D2", "D3"] and b.epoch == 2000.0
+    ra, dec = b.position_at(2025.9)
+    assert abs((dec - b.dec_deg) * 3600 - 10.36 * 25.9) < 0.01      # ~268 arcsec north
+    w = ts["wise-0855-0714"]
+    assert w.epoch == 2010.5 and w.detectors == ["D5", "D6"]
+    ra, dec = w.position_at(2025.9)
+    assert 120 < (w.ra_deg - ra) * 3600 * 0.992 < 130                # ~2 arcmin west
+    assert ts["r-draconis"].detectors == [f"D{i}" for i in range(1, 7)]
