@@ -113,3 +113,78 @@ def test_targets_load_and_propagate():
     ra, dec = w.position_at(2025.9)
     assert 120 < (w.ra_deg - ra) * 3600 * 0.992 < 130                # ~2 arcmin west
     assert ts["r-draconis"].detectors == [f"D{i}" for i in range(1, 7)]
+
+
+# ---------------- time-lapse / wavelength
+def _items(n_weeks=20, per_week=12):
+    import random
+    random.seed(1)
+    out = []
+    for wk in range(n_weeks):
+        for k in range(per_week):
+            out.append({"t_start_mjd": 60800 + wk * 7 + k * 0.3, "wave_um": random.uniform(1.64, 2.42),
+                        "on_detector": True})
+    return out
+
+
+def test_select_timelapse_same_wavelength_one_per_week():
+    from track1 import timelapse
+    import numpy as np
+    edges = np.linspace(1.64, 2.42, 18)
+    frames, ref, tol, cov = timelapse.select_timelapse(_items(), every_days=7, edges=edges)
+    assert len(cov) == 17 and ref is not None
+    assert all(abs(f["wave_um"] - ref) <= tol for f in frames)
+    weeks = [int((f["t_start_mjd"] - 60800) // 7) for f in frames]
+    assert len(weeks) == len(set(weeks))                      # at most one per week
+    assert frames[0]["gap_days"] is None and all(f["gap_days"] > 0 for f in frames[1:])
+    best = max(c["n_date_bins"] for c in cov)
+    assert len(frames) == best                                 # picked the best-covered channel
+
+
+def test_select_timelapse_fixed_wave_and_cap():
+    from track1 import timelapse
+    frames, ref, tol, _ = timelapse.select_timelapse(_items(), every_days=7, wave_um=2.0, tol_um=0.1, max_frames=5)
+    assert ref == 2.0 and len(frames) <= 5 and all(abs(f["wave_um"] - 2.0) <= 0.1 for f in frames)
+
+
+def test_wavelength_lookup_and_header_parse():
+    from astropy.io import fits
+    from track1 import wavelength
+    X = [1, 1021, 2040]; Y = [1, 1021, 2040]
+    wave = [[2.4, 2.4, 2.4], [2.0, 2.0, 2.0], [1.6, 1.6, 1.6]]
+    table = {"X": X, "Y": Y, "wave": wave, "band": [[0.05] * 3] * 3}
+    hdr = fits.Header()
+    hdr.update({"EXTNAME": "IMAGE", "DETECTOR": 3, "NAXIS": 2, "NAXIS1": 2040, "NAXIS2": 2040,
+                "CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN", "CRVAL1": 100.0, "CRVAL2": 20.0,
+                "CRPIX1": 1021.0, "CRPIX2": 1021.0, "CDELT1": -6.15 / 3600, "CDELT2": 6.15 / 3600,
+                "CRPIX1W": 1, "CRPIX2W": 1, "CRVAL1W": 1, "CRVAL2W": 1})
+    w = wavelength.wavelength_at(hdr, 100.0, 20.0, table)
+    assert w["on_detector"] and abs(w["raw_y"] - 1021) < 0.5 and abs(w["wave_um"] - 2.0) < 1e-6
+    # header bytes as they arrive from an HTTP Range request
+    prim = fits.PrimaryHDU().header.tostring()
+    img = fits.ImageHDU(header=hdr).header.tostring()
+    buf = (prim + img).encode() + b" " * 4000
+    parsed = wavelength.parse_image_header(buf)
+    assert parsed is not None and parsed["DETECTOR"] == 3
+
+
+def test_measure_aperture_and_saturation_flag(tmp_path):
+    import numpy as np
+    from astropy.io import fits
+    from track1 import timelapse
+    hdr = fits.Header({"CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN", "CRVAL1": 10.0, "CRVAL2": 0.0,
+                       "CRPIX1": 25.0, "CRPIX2": 25.0, "CDELT1": -6.15 / 3600, "CDELT2": 6.15 / 3600})
+    img = np.full((49, 49), 5.0, dtype=np.float32)
+    img[23:26, 23:26] += 10.0                                  # 9 px x 10 = 90 above background
+    flags = np.zeros((49, 49), dtype=np.int32)
+    fh = fits.Header({"MSKN0001": "OVERFLOW"})
+    f = tmp_path / "c.fits"
+    fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(img, hdr, name="IMAGE"),
+                  fits.ImageHDU(flags, fh, name="FLAGS")]).writeto(f)
+    m = timelapse.measure(f, 10.0, 0.0)
+    assert m["usable"] and not m["saturated"] and abs(m["flux"] - 90) < 1e-3
+    flags[24, 24] = 2                                           # OVERFLOW bit on the star
+    fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(img, hdr, name="IMAGE"),
+                  fits.ImageHDU(flags, fh, name="FLAGS")]).writeto(f, overwrite=True)
+    m = timelapse.measure(f, 10.0, 0.0)
+    assert m["saturated"] and not m["usable"] and "OVERFLOW" in m["flags"]
